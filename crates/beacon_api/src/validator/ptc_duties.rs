@@ -94,8 +94,7 @@ impl<'a> PtcDuty<'a> {
                     let ix = usize::try_from(validator_index)
                         .ok()
                         .filter(move |&ix| ix < view.validators.count())?;
-                    let pubkey = view.validators.scheme().public_key(view.validators.pubkey(ix));
-                    Some(Self { pubkey, validator_index, slot })
+                    Some(Self { pubkey: view.validators.pubkey(ix), validator_index, slot })
                 })
         })
     }

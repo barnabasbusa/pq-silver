@@ -87,7 +87,7 @@ impl<'a> AttesterDuty<'a> {
             .committee(view.slot.current_epoch(), slot, committee.committee_index)
             .and_then(|mut aggregators| aggregators.position(|member| member == validator_index));
         Some(Self {
-            pubkey: view.validators.scheme().public_key(view.validators.pubkey(index)),
+            pubkey: view.validators.pubkey(index),
             validator_index,
             committee_index: committee.committee_index as u64,
             committee_length: committee.members.len() as u64,

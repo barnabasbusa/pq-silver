@@ -1,5 +1,5 @@
 use silver_beacon_state_data::{
-    B256, BLSPubkey, Epoch, MIN_SEED_LOOKAHEAD, SLOTS_PER_EPOCH, Slot, StateReadView, pq::KeyScheme,
+    B256, BLSPubkey, Epoch, MIN_SEED_LOOKAHEAD, SLOTS_PER_EPOCH, Slot, StateReadView,
 };
 
 use crate::{
@@ -37,7 +37,6 @@ fn respond(req: &Request<'_>, ctx: &ApiCtx, resp: &mut Response<'_>, epochs_back
 
 pub(crate) struct ProposerDuties {
     pub(crate) dependent_root: B256,
-    pub(crate) scheme: KeyScheme,
     pub(crate) duties: [ProposerDuty; SLOTS_PER_EPOCH as usize],
 }
 
@@ -86,7 +85,7 @@ impl ProposerDuties {
         });
         let dependent_root =
             view.block_roots.duty_dependent_root(dependent_epoch, head_root, state_slot)?;
-        Some(Self { dependent_root, scheme: view.validators.scheme(), duties })
+        Some(Self { dependent_root, duties })
     }
 }
 

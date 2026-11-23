@@ -6,7 +6,7 @@ use std::io::Write;
 
 use silver_beacon_state_data::{
     B256, BeaconBlockHeader, Builder, Checkpoint, FAR_FUTURE_EPOCH, Fork, ForkName, SpecConfig,
-    Version, pq::KeyScheme,
+    Version,
 };
 use silver_common::{
     AGENT_VERSION, PayloadFrame, PreparedPayloadAttributes,
@@ -1052,8 +1052,7 @@ impl Json<'_> {
     pub(crate) fn proposer_duties(&mut self, duties: &ProposerDuties, execution_optimistic: bool) {
         self.duties_envelope(Some(duties.dependent_root), execution_optimistic, |json| {
             for duty in &duties.duties {
-                let pubkey = duties.scheme.public_key(&duty.pubkey);
-                json.duty(pubkey, duty.validator_index, |json| {
+                json.duty(&duty.pubkey, duty.validator_index, |json| {
                     json.key("slot");
                     json.quoted_u64(duty.slot);
                 });
@@ -1178,7 +1177,7 @@ impl Json<'_> {
         self.out.extend_from_slice(b",\"status\":\"");
         self.out.extend_from_slice(record.status.name().as_bytes());
         self.out.extend_from_slice(b"\",\"validator\":{\"pubkey\":");
-        self.unseparated_hex(record.scheme.public_key(&record.pubkey));
+        self.unseparated_hex(&record.pubkey);
         if let Some(vrf_root) = &record.vrf_root {
             self.out.extend_from_slice(b",\"vrf_root\":");
             self.unseparated_hex(vrf_root);
@@ -1202,13 +1201,7 @@ impl Json<'_> {
         self.out.extend_from_slice(b"}}");
     }
 
-    pub(crate) fn builder(
-        &mut self,
-        index: u64,
-        status: &str,
-        builder: &Builder,
-        scheme: KeyScheme,
-    ) {
+    pub(crate) fn builder(&mut self, index: u64, status: &str, builder: &Builder) {
         self.begin_object();
         self.key("index");
         self.quoted_u64(index);
@@ -1217,7 +1210,7 @@ impl Json<'_> {
         self.key("builder");
         self.begin_object();
         self.key("pubkey");
-        self.hex(scheme.public_key(&builder.pubkey));
+        self.hex(&builder.pubkey);
         self.key("version");
         self.quoted_u64(builder.version.into());
         self.key("execution_address");
