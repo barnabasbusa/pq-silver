@@ -1,8 +1,11 @@
 CONSENSUS_SPECS_TEST_VERSION ?= v1.7.0-beta.4
 OUTPUT_DIR := ./consensus-spec-tests
-# One tarball per preset; `just test-minimal` reads the minimal one.
-PRESETS := mainnet minimal
-STAMP := $(OUTPUT_DIR)/.version-$(CONSENSUS_SPECS_TEST_VERSION)-presets
+# One tarball per preset; `just test-minimal` reads the minimal one. CI jobs
+# override it to fetch only their own.
+PRESETS ?= mainnet minimal
+empty :=
+space := $(empty) $(empty)
+STAMP := $(OUTPUT_DIR)/.version-$(CONSENSUS_SPECS_TEST_VERSION)-$(subst $(space),-,$(PRESETS))
 
 .PHONY: all clean
 
