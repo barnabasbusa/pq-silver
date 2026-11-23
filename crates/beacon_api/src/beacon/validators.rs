@@ -51,9 +51,9 @@ pub(crate) fn post_state_validators(req: &Request<'_>, ctx: &ApiCtx, resp: &mut 
     respond_validators(req, ctx, resp, selection);
 }
 
-/// A status filter alone selects the registry it admits, as helix's relay
-/// asks for `active,pending`. On mainnet that body is over 500 MB, so it is
-/// streamed.
+/// No id selects the whole registry, narrowed by any status filter: helix's
+/// relay asks for `active,pending`, and ethlambda's validator client for all
+/// of it. On mainnet that body is over 500 MB, so it is streamed.
 fn respond_validators(
     req: &Request<'_>,
     ctx: &ApiCtx,
@@ -61,7 +61,7 @@ fn respond_validators(
     selection: Result<Selection, Rejection>,
 ) {
     match selection {
-        Ok(selection) if selection.ids.is_empty() && selection.statuses.filters() => {
+        Ok(selection) if selection.ids.is_empty() => {
             if ctx.registry_downloads >= MAX_REGISTRY_DOWNLOADS {
                 return resp.error(503, "too many registry downloads in progress");
             }
@@ -102,9 +102,8 @@ impl Rejection {
     }
 }
 
-/// The whole registry is a valid selection the schema allows and no validator
-/// client sends: each one names the validators it runs, and the one library
-/// that wants every validator downloads the SSZ state instead.
+/// Every balance is a valid selection the schema allows and no validator
+/// client sends: each one names the validators it runs.
 fn respond_selection(
     req: &Request<'_>,
     ctx: &ApiCtx,
@@ -487,10 +486,6 @@ impl StatusSet {
         Self(self.0 | other.0)
     }
 
-    fn filters(self) -> bool {
-        self.0 != 0
-    }
-
     fn admits(self, status: ValidatorStatus) -> bool {
         self.0 == 0 || self.0 & 1 << status as u8 != 0
     }
@@ -779,12 +774,20 @@ mod tests {
     }
 
     #[test]
-    fn list_rejects_malformed_filters_and_an_empty_selection() {
+    fn list_rejects_malformed_filters() {
         let path = "/eth/v1/beacon/states/head/validators";
-        for query in ["id=0&status=running", "id=abc", "id=0&id=0x12", "status=active,running", ""]
-        {
+        for query in ["id=0&status=running", "id=abc", "id=0&id=0x12", "status=active,running"] {
             assert_eq!(status_code(&get(path, query)), "400", "{query:?}");
         }
+    }
+
+    #[test]
+    fn list_without_ids_or_statuses_downloads_the_registry() {
+        let ctx = ctx();
+        let path = "/eth/v1/beacon/states/head/validators";
+        let req = request("GET", path);
+        assert!(matches!(testing::dispatch(&ctx, &req).0, Outcome::Download(_)));
+        assert!(matches!(testing::dispatch(&ctx, &posting(path, "{}")).0, Outcome::Download(_)));
     }
 
     #[test]
@@ -815,9 +818,7 @@ mod tests {
         assert!(filtered.starts_with("[{\"index\":\"1\","), "{filtered}");
         assert_eq!(filtered.matches("\"index\"").count(), 1);
 
-        for body in
-            ["", "[]", "{\"ids\":[\"x\"]}", "{\"ids\":[\"0\"],\"statuses\":[\"nope\"]}", "{}"]
-        {
+        for body in ["", "{\"ids\":[\"x\"]}", "{\"ids\":[\"0\"],\"statuses\":[\"nope\"]}"] {
             assert_eq!(status_code(&post(body)), "400", "{body:?}");
         }
     }
