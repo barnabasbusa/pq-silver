@@ -6241,6 +6241,7 @@ dependencies = [
  "silver_chain_spec",
  "silver_common",
  "silver_log",
+ "silver_preset",
  "tempfile",
  "toml",
 ]
