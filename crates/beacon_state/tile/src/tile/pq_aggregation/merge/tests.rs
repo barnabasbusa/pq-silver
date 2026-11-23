@@ -38,7 +38,7 @@ fn aggregates_of_one_data_become_one_attestation_in_committee_order() {
         panic!("one attestation per data")
     };
     assert_eq!(AttestationPqView::data(first).as_bytes(), &[1; ATTESTATION_DATA_SIZE]);
-    assert_eq!(AttestationPqView::committee_bits(first), &[0b101, 0]);
+    assert_eq!(bitvector_word(AttestationPqView::committee_bits(first)), 0b101);
     assert_eq!(bitlist_len(AttestationPqView::aggregation_bits(first)), 5 + 9);
     assert_eq!(votes(first), [1, 5, 5 + 3, 5 + 8], "committee 0, then the union of committee 2");
     assert!(AttestationPqView::check_canonical(first));
