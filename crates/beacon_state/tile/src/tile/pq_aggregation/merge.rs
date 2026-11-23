@@ -1,6 +1,8 @@
 use silver_common::{
     Nanos, TCacheRead, TProducer,
-    ssz_view::{ATTESTATION_DATA_SIZE, AttestationPqView, MAX_COMMITTEES_PER_SLOT_PQ},
+    ssz_view::{
+        ATTESTATION_DATA_SIZE, AttestationPqView, MAX_COMMITTEES_PER_SLOT_PQ, bitvector_word,
+    },
 };
 
 use super::{
@@ -134,7 +136,7 @@ fn data_of(aggregate: &[u8]) -> &[u8; ATTESTATION_DATA_SIZE] {
 }
 
 fn committee_of(aggregate: &[u8]) -> usize {
-    u16::from_le_bytes(*AttestationPqView::committee_bits(aggregate)).trailing_zeros() as usize
+    bitvector_word(AttestationPqView::committee_bits(aggregate)).trailing_zeros() as usize
 }
 
 #[cfg(test)]
