@@ -4,7 +4,7 @@ use silver_beacon_state_data::{Slot, SpecConfig};
 use silver_common::{
     BeaconApiRequest, BidPolicy, ForkName, PayloadFrame, ProduceBlockFailure, ProducedBlock,
     RandaoReveal, TCacheReader,
-    json_fields::{parse_hex, parse_uint64, uint64},
+    json_fields::{bytes, parse_hex, parse_uint64, uint64},
     ssz_view::VRF_PROOF_SIZE,
 };
 use silver_pbs::BuilderConfig;
@@ -45,9 +45,49 @@ pub(crate) fn produce_block_v4(req: &Request<'_>, ctx: &ApiCtx, resp: &mut Respo
         graffiti,
         bid_policy,
         include_payload,
-        ssz_response: req.accepts_ssz(),
+        answer: if req.accepts_ssz() { Answer::Ssz } else { Answer::Json },
     }));
 }
+
+/// ethlambda's validator client asks here at PQ slots, as the Beacon API has
+/// no PQ production of its own. Like ethlambda, it builds locally only.
+pub(crate) fn produce_pq_block(req: &Request<'_>, ctx: &ApiCtx, resp: &mut Response<'_>) {
+    let Some(slot) = req.params.get("slot").and_then(parse_uint64) else {
+        return resp.error(400, "invalid slot");
+    };
+    if !ctx.spec.is_pq_at_slot(slot) {
+        return resp.error(400, "this endpoint serves PQ slots only");
+    }
+    if !req.body_is_json() {
+        return resp.error(415, "only a JSON body is read");
+    }
+    let Ok(body) = serde_json::from_slice::<PqBlockBody>(req.body) else {
+        return resp.error(400, "invalid request body");
+    };
+    let proof = body.randao_reveal.map(|Bytes32(node)| node);
+    let Some(randao_reveal) = resp.hold(proof.as_flattened()) else {
+        return;
+    };
+    resp.defer(Outcome::AwaitingProducedBlock(ProduceBlockRequest {
+        slot,
+        randao_reveal: RandaoReveal::Vrf(randao_reveal),
+        graffiti: body.graffiti.map_or([0; 32], |Bytes32(graffiti)| graffiti),
+        bid_policy: BidPolicy { min_bid: 0, builder_boost_factor: 0 },
+        include_payload: true,
+        answer: Answer::PqBlockContents,
+    }));
+}
+
+/// The VRF proof comes as its leaf and branch, one hex root each.
+#[derive(Deserialize)]
+struct PqBlockBody {
+    randao_reveal: [Bytes32; VRF_PROOF_SIZE / 32],
+    #[serde(default)]
+    graffiti: Option<Bytes32>,
+}
+
+#[derive(Deserialize)]
+struct Bytes32(#[serde(deserialize_with = "bytes")] [u8; 32]);
 
 /// The `BuilderConfig` body, in SSZ or JSON, as the p2p bid terms. `None`
 /// having answered: PQ blocks are built locally, so naming a builder is an
@@ -122,7 +162,16 @@ pub(crate) struct ProduceBlockRequest {
     graffiti: [u8; 32],
     bid_policy: BidPolicy,
     include_payload: bool,
-    ssz_response: bool,
+    answer: Answer,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Answer {
+    Json,
+    Ssz,
+    /// ethlambda's `pq::BlockContents`: the block and its envelope, without
+    /// the blobs, which are published from this node's own build.
+    PqBlockContents,
 }
 
 /// What a produced block is answered with beside the block, as headers and,
@@ -198,6 +247,10 @@ impl ProduceBlockRequest {
         let version = spec.fork_at_slot(self.slot).name();
         let payload = block.payload.filter(|_| self.include_payload);
         let Some(payload) = payload else {
+            if self.answer == Answer::PqBlockContents {
+                silver_log::error!(slot = self.slot, "local PQ build has no payload");
+                return resp.error(500, "the block was built without its payload");
+            }
             return self.respond_without_payload(resp, &block, reader, version);
         };
         let header = reader.acquire(block.header);
@@ -214,13 +267,36 @@ impl ProduceBlockRequest {
             return resp.error(500, "the local envelope is unavailable");
         };
         let metadata = ProducedBlockMetadata::new(&block, version, true);
-        if !self.ssz_response {
-            return resp.json_with_headers(&metadata.headers(), |json| {
+        match self.answer {
+            Answer::Json => resp.json_with_headers(&metadata.headers(), |json| {
                 json.produced_block(&metadata, |json| {
                     json.pq_block_and_envelope(head, envelope, &payload)
                 })
-            });
+            }),
+            Answer::Ssz => Self::send_contents(resp, &metadata, head, envelope, &payload),
+            Answer::PqBlockContents => {
+                const FIXED: usize = 2 * 4;
+                let mut offsets = [0; FIXED];
+                offsets[..4].copy_from_slice(&(FIXED as u32).to_le_bytes());
+                offsets[4..].copy_from_slice(&((FIXED + head.len()) as u32).to_le_bytes());
+                resp.send(200, Some(SSZ_MEDIA_TYPE), &metadata.headers(), &[
+                    &offsets,
+                    head,
+                    envelope,
+                    payload.execution_payload,
+                    payload.execution_requests,
+                ]);
+            }
         }
+    }
+
+    fn send_contents(
+        resp: &mut Response<'_>,
+        metadata: &ProducedBlockMetadata,
+        head: &[u8],
+        envelope: &[u8],
+        payload: &PayloadFrame<'_>,
+    ) {
         let envelope_at = 4 * 4 + head.len();
         let proofs_at = envelope_at +
             envelope.len() +
@@ -256,7 +332,7 @@ impl ProduceBlockRequest {
             return resp.error(500, "the block could not be read");
         };
         let metadata = ProducedBlockMetadata::new(block, version, false);
-        if self.ssz_response {
+        if self.answer == Answer::Ssz {
             resp.send(200, Some(SSZ_MEDIA_TYPE), &metadata.headers(), &[beacon_block]);
         } else {
             resp.json_with_headers(&metadata.headers(), |json| {
@@ -360,7 +436,7 @@ mod tests {
             graffiti,
             bid_policy: BidPolicy { min_bid: 7, builder_boost_factor: 150 },
             include_payload: false,
-            ssz_response: true,
+            answer: Answer::Ssz,
         });
     }
 
@@ -413,7 +489,7 @@ mod tests {
         let (outcome, out) = dispatch(&pq_ctx(), &req(config));
         assert!(out.is_empty());
         let Outcome::AwaitingProducedBlock(request) = outcome else { panic!("{outcome:?}") };
-        assert!(!request.ssz_response);
+        assert_eq!(request.answer, Answer::Json);
         assert_eq!(request.bid_policy, BidPolicy { min_bid: 7, builder_boost_factor: 150 });
 
         let naming_a_builder = r#"{"min_bid":"0","builder_boost_factor":"100","builders":[{}]}"#;
@@ -422,6 +498,81 @@ mod tests {
             assert_eq!(outcome, Outcome::Response(None), "{body}");
             assert_eq!(status_code(&out), "400", "{body}");
         }
+    }
+
+    fn post_pq_block(
+        ctx: &ApiCtx,
+        slot: u64,
+        body: &str,
+        submissions: &mut TProducer,
+    ) -> Result<ProduceBlockRequest, String> {
+        let path = format!("/eth/v1/validator/pq_blocks/{slot}");
+        let req = ParsedRequest {
+            accept: Some(SSZ_MEDIA_TYPE),
+            content_type: Some("application/json"),
+            body: body.as_bytes(),
+            ..request("POST", &path)
+        };
+        match dispatch_into(ctx, &req, submissions) {
+            (Outcome::AwaitingProducedBlock(request), _) => Ok(request),
+            (Outcome::Response(None), out) => Err(status_code(&out).to_owned()),
+            (outcome, _) => panic!("{outcome:?}"),
+        }
+    }
+
+    fn vrf_roots(count: usize) -> String {
+        let roots: Vec<_> =
+            (0..count).map(|i| format!("\"0x{}\"", hex::encode([i as u8; 32]))).collect();
+        roots.join(",")
+    }
+
+    /// ethlambda's `BeaconNodeClient::produce_pq_block`.
+    #[test]
+    fn ethlambda_pq_block_request_defers_for_local_block_contents() {
+        let roots = VRF_PROOF_SIZE / 32;
+        let body = format!(
+            "{{\"randao_reveal\":[{}],\"graffiti\":\"0x{}\"}}",
+            vrf_roots(roots),
+            "68".repeat(32)
+        );
+        let mut submissions = submissions();
+        let request = post_pq_block(&pq_ctx(), SLOT + 1, &body, &mut submissions).unwrap();
+        let RandaoReveal::Vrf(reveal) = request.randao_reveal else { panic!("a PQ reveal") };
+        let expected: Vec<_> = (0..roots).flat_map(|i| [i as u8; 32]).collect();
+        assert_eq!(submissions.read_buffer(reveal).unwrap(), expected);
+        assert_eq!(request, ProduceBlockRequest {
+            slot: SLOT + 1,
+            randao_reveal: request.randao_reveal,
+            graffiti: [0x68; 32],
+            bid_policy: BidPolicy { min_bid: 0, builder_boost_factor: 0 },
+            include_payload: true,
+            answer: Answer::PqBlockContents,
+        });
+
+        let body = format!("{{\"randao_reveal\":[{}]}}", vrf_roots(roots));
+        let request = post_pq_block(&pq_ctx(), SLOT + 1, &body, &mut submissions).unwrap();
+        assert_eq!(request.graffiti, [0; 32]);
+    }
+
+    #[test]
+    fn pq_block_request_refuses_a_malformed_body_or_a_pre_pq_slot() {
+        let roots = VRF_PROOF_SIZE / 32;
+        let reveal = |count| format!("{{\"randao_reveal\":[{}]}}", vrf_roots(count));
+        for body in [
+            reveal(roots - 1),
+            reveal(roots + 1),
+            format!("{{\"randao_reveal\":[{}],\"graffiti\":\"0x68\"}}", vrf_roots(roots)),
+            r#"{"randao_reveal":"0x11"}"#.to_string(),
+            String::new(),
+        ] {
+            let refused = post_pq_block(&pq_ctx(), SLOT + 1, &body, &mut submissions());
+            assert_eq!(refused, Err("400".to_owned()), "{body}");
+        }
+
+        let mut ctx = pq_ctx();
+        ctx.spec.pq_fork_epoch = u64::MAX;
+        let refused = post_pq_block(&ctx, SLOT + 1, &reveal(roots), &mut submissions());
+        assert_eq!(refused, Err("400".to_owned()));
     }
 
     #[test]

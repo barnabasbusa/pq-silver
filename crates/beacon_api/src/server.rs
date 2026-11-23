@@ -4294,6 +4294,72 @@ mod tests {
         }
     }
 
+    /// ethlambda's PQ client reads `pq::BlockContents`, which leaves the blobs
+    /// out.
+    #[test]
+    fn pq_blocks_answer_the_block_and_its_envelope() {
+        let mut server = server_with(64, LONG_TIMEOUT);
+        server.api.ctx = submission::pq_ctx();
+        let mut client = connect(tcp_addr(&server));
+        let slot = submission::SLOT + 1;
+        let root = format!("\"0x{}\"", "11".repeat(32));
+        let request =
+            format!("{{\"randao_reveal\":[{}]}}", vec![root; VRF_PROOF_SIZE / 32].join(","));
+        write!(
+            client,
+            "POST /eth/v1/validator/pq_blocks/{slot} HTTP/1.1\r\nHost: localhost\r\n\
+             Accept: application/octet-stream\r\nContent-Type: application/json\r\n\
+             Content-Length: {}\r\nConnection: close\r\n\r\n{request}",
+            request.len()
+        )
+        .unwrap();
+        let BeaconApiRequest::ProduceBlock { request_id, bid_policy, .. } =
+            deferred_request(&mut server)
+        else {
+            panic!("the block is asked of the state tile")
+        };
+        assert_eq!(bid_policy.builder_boost_factor, 0);
+
+        let block = b"beacon block";
+        let payload = b"execution payload";
+        let requests = b"execution requests";
+        let mut frame = vec![0; PayloadFrame::HEADER_LEN];
+        PayloadFrame::write_header(&mut frame, payload.len(), requests.len(), 1, false, &[0; 32]);
+        let proofs = vec![0x44; PayloadFrame::CELL_PROOFS_PER_BLOB_LEN];
+        let blobs = vec![0x55; BYTES_PER_BLOB];
+        for part in [&payload[..], &[0x33; 48], requests, &proofs, &blobs] {
+            frame.extend_from_slice(part);
+        }
+        let envelope_header =
+            PayloadFrame::parse(&frame).unwrap().self_build_envelope_header([7; 32], [8; 32]);
+        let frame =
+            server.submissions.write_with(frame.len(), |out| out.copy_from_slice(&frame)).unwrap();
+        let header = server.serve_bytes(block);
+        server.answer(BeaconApiResponse::ProducedBlock {
+            request_id,
+            block: Ok(ProducedBlock {
+                header,
+                payload_at: block.len() as u32,
+                payload: Some(frame),
+                envelope_header: Some(envelope_header),
+                execution_payload_value: [0; 32],
+                consensus_block_value: [0; 32],
+                builder_entry: None,
+                body_root: [0; 32],
+            }),
+        });
+        let reader = std::thread::spawn(move || read_to_eof(client));
+        let response = serve(&mut server, reader, "PQ block contents");
+        let text = String::from_utf8_lossy(&response);
+        assert!(text.starts_with("HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\n"));
+        assert!(text.contains("Eth-Consensus-Version: pq\r\n"));
+        let body = body(&response);
+        let envelope_at = u32::from_le_bytes(body[4..8].try_into().unwrap()) as usize;
+        assert_eq!(&body[..4], 8u32.to_le_bytes());
+        assert_eq!(&body[8..envelope_at], block);
+        assert_eq!(&body[envelope_at..], [&envelope_header[..], payload, requests].concat());
+    }
+
     /// Lighthouse's PQ client posts a JSON `BuilderConfig` and reads the block
     /// and its envelope back as JSON.
     #[test]
