@@ -13,7 +13,7 @@ use super::{
     Aggregate, VerifiedVote,
     claims::Vote,
     leaf::{LeafAggregation, LeafKey, ProvedAggregate},
-    merge::MergeAggregation,
+    merge::{MergeAggregation, OnChainAggregates},
     strategy::Batch,
 };
 use crate::tile::Producers;
@@ -87,6 +87,8 @@ impl LeanVm {
 pub struct PqAggregator {
     leaves: FxHashMap<LeafKey, LeafAggregation>,
     merges: FxHashMap<Slot, MergeAggregation>,
+    /// A pruned merge, whose buffers the next merge reuses.
+    spare_merge: Option<MergeAggregation>,
     /// An event changed state since `send_next` last found nothing to send.
     changed: bool,
     leanvm: LeanVm,
@@ -127,13 +129,20 @@ impl PqAggregator {
 
     /// `aggregate` is verified, for the block of `slot`. A merge refuses it
     /// once it holds too many committees.
-    pub fn add_aggregate(&mut self, slot: Slot, aggregate: Aggregate, ticker: &SlotTicker) {
+    pub fn add_aggregate(&mut self, slot: Slot, aggregate: Aggregate<'_>, ticker: &SlotTicker) {
         let deadline = ticker.slot_start(slot);
         if ticker.since_genesis() >= deadline {
             silver_log::debug!(slot, "aggregate after the merge deadline");
             return;
         }
-        let merge = self.merges.entry(slot).or_insert_with(|| MergeAggregation::new(deadline));
+        let spare = &mut self.spare_merge;
+        let merge = self.merges.entry(slot).or_insert_with(|| match spare.take() {
+            Some(mut merge) => {
+                merge.reset(deadline);
+                merge
+            }
+            None => MergeAggregation::new(deadline),
+        });
         if !merge.add(aggregate) {
             silver_log::warn!(slot, "aggregate dropped: the merge holds too many committees");
             return;
@@ -169,7 +178,9 @@ impl PqAggregator {
     /// for one still occupies the leanVM sidecar until its response arrives.
     pub fn prune_before(&mut self, floor: Slot) {
         self.leaves.retain(|leaf, _| leaf.slot >= floor);
-        self.merges.retain(|&slot, _| slot >= floor);
+        if let Some((_, pruned)) = self.merges.extract_if(|&slot, _| slot < floor).last() {
+            self.spare_merge = Some(pruned);
+        }
     }
 
     /// Sends a batch of the highest priority aggregation, if the leanVM
@@ -209,7 +220,7 @@ impl PqAggregator {
         self.leaves.get(&LeafKey { slot, committee_index, data_root })?.proved(committee_index)
     }
 
-    pub fn block_proof(&self, slot: Slot) -> Option<(impl Iterator<Item = &[u8]> + Clone, &[u8])> {
+    pub fn block_proof(&self, slot: Slot) -> Option<(OnChainAggregates<'_>, &[u8])> {
         self.merges.get(&slot)?.block_proof()
     }
 

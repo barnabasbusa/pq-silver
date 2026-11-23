@@ -21,8 +21,9 @@ use silver_common::{
     ssz_hash::{BlockFork, HashedBody},
     ssz_view::{
         BEACON_BLOCK_BODY_FIXED, BEACON_BLOCK_FIXED, BLOCK_SYNC_AGGREGATE_SIZE, BuilderBidFuluView,
-        ExecutionPayloadEnvelopeView, ExecutionPayloadView, SignedBuilderBidFuluView,
-        SignedExecutionPayloadBidView, VRFProof, XMSS_SIGNATURE_SIZE,
+        ExecutionPayloadEnvelopeView, ExecutionPayloadView, MAX_ATTESTATIONS_PQ,
+        SignedBuilderBidFuluView, SignedExecutionPayloadBidView, VRFProof, XMSS_SIGNATURE_SIZE,
+        variable_list_items,
     },
     wei_saturating,
 };
@@ -227,19 +228,32 @@ impl PackedOperations {
         rewards: &AttestationRewards<'_>,
         block_slot: Slot,
     ) {
-        // todo(CL-235): no gossip aggregate reaches a merge yet, so none has a proof.
-        let Some((attestations, proof)) = aggregator.block_proof(block_slot) else { return };
-        let value: Option<u64> =
-            attestations.clone().map(|attestation| rewards.attestation_value(attestation)).sum();
-        if value.is_none_or(|value| value == 0) {
+        let Some((on_chain, proof)) = aggregator.block_proof(block_slot) else { return };
+        let count = on_chain.len();
+        if count > MAX_ATTESTATIONS_PQ {
+            silver_log::warn!(
+                slot = block_slot,
+                attestations = count,
+                "merge covers too many attestation data; packed no attestations"
+            );
             return;
         }
-        let mut at = 4 * attestations.clone().count();
-        for attestation in attestations.clone() {
-            self.attestations.extend_from_slice(&(at as u32).to_le_bytes());
-            at += attestation.len();
+        debug_assert!(self.attestations.is_empty(), "the merge is the only attestation source");
+        if on_chain.write_list(&mut self.attestations).is_none() {
+            self.attestations.clear();
+            silver_log::warn!(
+                slot = block_slot,
+                "merged aggregates disagree on a committee size; packed no attestations"
+            );
+            return;
         }
-        attestations.for_each(|attestation| self.attestations.extend_from_slice(attestation));
+        let value: Option<u64> = variable_list_items(&self.attestations)
+            .map(|attestation| rewards.attestation_value(attestation))
+            .sum();
+        if value.is_none_or(|value| value == 0) {
+            self.attestations.clear();
+            return;
+        }
         self.proof.extend_from_slice(proof);
     }
 
@@ -1470,10 +1484,11 @@ impl BeaconStateTile {
         builds_on_full_parent: bool,
         parent_root: &B256,
     ) -> Box<[u8]> {
+        let layout = self.requests_layout(slot);
         let requests = if builds_on_full_parent {
-            self.payload_execution_requests.get(parent_root)
+            self.payload_execution_requests.get(parent_root, layout)
         } else {
-            self.requests_layout(slot).empty()
+            layout.empty()
         };
         requests.into()
     }

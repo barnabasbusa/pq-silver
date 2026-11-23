@@ -15,6 +15,9 @@ pub(super) struct AggregateAwaitingProof {
     pub committee_index: u64,
     pub data_root: B256,
     pub aggregator_index: usize,
+    /// The message its attesters signed, when this node merges it into a
+    /// block proof.
+    pub merge_message: Option<[u8; 32]>,
 }
 
 pub(super) enum GossipAwaitingProof {
