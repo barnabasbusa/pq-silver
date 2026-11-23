@@ -6,14 +6,14 @@ use std::{
 
 use flux::{timing::Nanos, type_hash_derive::TypeHash};
 use silver_beacon_state_data::{
-    B256, BLSPubkey, ExecutionAddress, PayloadWithdrawals, SLOTS_PER_EPOCH, SYNC_COMMITTEE_SUBNETS,
-    ShufflingId,
+    AGGREGATORS_PER_COMMITTEE, B256, BLSPubkey, ExecutionAddress, PayloadWithdrawals,
+    SLOTS_PER_EPOCH, SYNC_COMMITTEE_SUBNETS, ShufflingId,
 };
 
 use crate::{
-    CacheFrameRef, DataKind, Enr, ForkName, GossipDomain, GossipTopic, GossipTraffic, Identify,
-    LOCAL_GOSSIP_STREAM_ID, MessageId, Origin, P2pStreamId, PayloadFrame, PeerId, StreamProtocol,
-    TCacheProducer, TCacheRead, TProducer,
+    ATTESTATION_SUBNETS_PQ, CacheFrameRef, DataKind, Enr, ForkName, GossipDomain, GossipTopic,
+    GossipTraffic, Identify, LOCAL_GOSSIP_STREAM_ID, MessageId, Origin, P2pStreamId, PayloadFrame,
+    PeerId, StreamProtocol, TCacheProducer, TCacheRead, TProducer,
     block_contents::BLOCK_CONTENTS_FIXED,
     column_util::columns_of,
     ssz_hash::HashedBody,
@@ -214,15 +214,45 @@ pub struct SlotSubnets {
     pub slot: u64,
     pub attesting: u64,
     pub aggregating: u64,
+    /// PQ only: per subnet, one bit per place in its aggregation committee.
+    pub aggregator_positions: u64,
 }
 
 impl SlotSubnets {
-    pub const SIZE: usize = 3 * size_of::<u64>();
+    pub const SIZE: usize = 4 * size_of::<u64>();
+    pub const POSITIONS_PER_SUBNET: u64 = AGGREGATORS_PER_COMMITTEE as u64;
+    const _FITS: () = assert!(
+        ATTESTATION_SUBNETS_PQ as u64 * Self::POSITIONS_PER_SUBNET <= u64::BITS as u64,
+        "every PQ subnet's positions fit `aggregator_positions`"
+    );
+
+    /// The `aggregator_positions` bit of `position` on `subnet`. Zero when
+    /// either is out of range.
+    pub fn position_bit(subnet: u64, position: u64) -> u64 {
+        if position >= Self::POSITIONS_PER_SUBNET {
+            return 0;
+        }
+        1u64.checked_shl((subnet * Self::POSITIONS_PER_SUBNET + position) as u32).unwrap_or(0)
+    }
+
+    /// The last place a local aggregator of `subnet` holds in its aggregation
+    /// committee; the last place of all when none was named, so its votes are
+    /// cut off latest. `None` when no local validator aggregates on `subnet`.
+    pub fn last_aggregator_position(&self, subnet: u64) -> Option<u64> {
+        if self.aggregating.checked_shr(subnet as u32)? & 1 == 0 {
+            return None;
+        }
+        let places = (1 << Self::POSITIONS_PER_SUBNET) - 1;
+        let shift = (subnet * Self::POSITIONS_PER_SUBNET) as u32;
+        let named = self.aggregator_positions.checked_shr(shift).map_or(0, |held| held & places);
+        Some(named.checked_ilog2().map_or(Self::POSITIONS_PER_SUBNET - 1, u64::from))
+    }
 
     pub fn encode(&self, out: &mut [u8]) {
         out[..8].copy_from_slice(&self.slot.to_le_bytes());
         out[8..16].copy_from_slice(&self.attesting.to_le_bytes());
-        out[16..Self::SIZE].copy_from_slice(&self.aggregating.to_le_bytes());
+        out[16..24].copy_from_slice(&self.aggregating.to_le_bytes());
+        out[24..Self::SIZE].copy_from_slice(&self.aggregator_positions.to_le_bytes());
     }
 
     pub fn decode_all(bytes: &[u8]) -> impl Iterator<Item = Self> {
@@ -233,6 +263,7 @@ impl SlotSubnets {
             slot: word(record, 0),
             attesting: word(record, 8),
             aggregating: word(record, 16),
+            aggregator_positions: word(record, 24),
         })
     }
 }

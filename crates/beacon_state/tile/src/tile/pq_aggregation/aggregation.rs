@@ -45,8 +45,9 @@ impl BestProof {
 /// How much an aggregation wants the leanVM sidecar; the highest goes first.
 /// Fields compare in declaration order.
 ///
-/// A leaf of slot `S` ends at `aggregate_due(S)`. A merge for the block of
-/// slot `B` ends at `slot_start(B)`, later than the due time of `B - 1`.
+/// A leaf of slot `S` ends when its last local aggregator's aggregate is due.
+/// A merge for the block of slot `B` ends at `slot_start(B)`, later than the
+/// due time of `B - 1`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Priority {
     /// The earliest deadline first, leaf or merge.
@@ -70,6 +71,11 @@ impl Aggregation {
     pub fn new(deadline: Nanos) -> Self {
         let (verified, proofs) = (Vec::new(), ProofArenas::default());
         Self { deadline, verified, proofs, best: None, failures: 0 }
+    }
+
+    /// A later local aggregator keeps it open longer; it never closes earlier.
+    pub fn extend_deadline(&mut self, deadline: Nanos) {
+        self.deadline = self.deadline.max(deadline);
     }
 
     /// Empty again, keeping its buffers.
