@@ -316,6 +316,7 @@ impl Config {
                 spec.fork_epoch(earlier),
             )));
         }
+        chain.require_committee_count_in_range()?;
 
         let max_blobs = spec.max_scheduled_blobs_per_block();
         if max_blobs > MAX_BLOBS_PER_BLOCK as u64 {
@@ -765,6 +766,19 @@ mod tests {
         let err = chain.require_pq_from_genesis().unwrap_err();
         let text = format!("{err}");
         assert!(text.contains("PQ_FORK_EPOCH"), "error should name the key: {text}");
+    }
+
+    #[test]
+    fn committee_count_cap_must_fit_the_committee_bits() {
+        let mut chain = Config::mainnet().unwrap().chain().unwrap();
+        for (configured, accepted) in [(0, false), (1, true), (16, true), (17, false)] {
+            chain.spec.x_max_committee_count_per_slot = configured;
+            let checked = chain.require_committee_count_in_range();
+            assert_eq!(checked.is_ok(), accepted, "{configured}");
+            if let Err(err) = checked {
+                assert!(format!("{err}").contains("X_MAX_COMMITTEE_COUNT_PER_SLOT"));
+            }
+        }
     }
 
     #[test]
