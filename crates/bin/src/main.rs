@@ -1,12 +1,4 @@
-use std::{
-    error::Error,
-    io,
-    net::IpAddr,
-    path::Path,
-    sync::Arc,
-    thread,
-    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
-};
+use std::{error::Error, io, net::IpAddr, path::Path, sync::Arc, thread, time::Instant};
 
 use clap::Parser;
 use flux::{
@@ -43,12 +35,15 @@ use silver_network::{ClusterNodes, Context, InboundLimits, NetworkTile, P2p};
 use silver_peer::PeerManager;
 use silver_storage::tile::StorageTile;
 
-use crate::{args::Args, checkpoint::BootCheckpoint, cluster::ClusterStartup};
+use crate::{
+    args::Args, checkpoint::BootCheckpoint, cluster::ClusterStartup, pre_genesis::PreGenesisApi,
+};
 
 mod args;
 mod checkpoint;
 mod cluster;
 mod cluster_admin;
+mod pre_genesis;
 
 #[cfg(not(feature = "alloc-profile"))]
 #[global_allocator]
@@ -189,7 +184,9 @@ fn main() -> Result<(), Box<dyn Error>> {
     silver_log::info!(enr = local_enr.to_base64(), "local ENR on startup");
 
     let spec = Arc::new(chain_config.spec.clone());
-    sleep_until_genesis(genesis.unix_secs);
+    let beacon_api_binds =
+        config.beacon_api_bind().iter().map(String::as_str).map(Bind::parse).collect::<Vec<_>>();
+    PreGenesisApi::new(&keypair, &local_enr).serve_until(&beacon_api_binds, genesis.unix_secs);
     let ticker = SlotTicker::new(genesis.unix_secs, &spec, chain_config.playload_lookahead());
 
     // Long-lived subnets: advertised from boot (peer retention exempts us
@@ -399,8 +396,6 @@ fn main() -> Result<(), Box<dyn Error>> {
     .with_data_columns_cache(cell_config, cell_slot, cell_slot_start)
     .map_err(|error| format!("cell store construction: {error:?}"))?;
 
-    let beacon_api_binds =
-        config.beacon_api_bind().iter().map(String::as_str).map(Bind::parse).collect::<Vec<_>>();
     let application_boundary_tile = ApplicationBoundaryTile::new(
         &beacon_api_binds,
         config.beacon_api_allowed_hosts(),
@@ -482,14 +477,4 @@ fn attached<'a, T: Tile<SilverSpine> + 'a>(
     let name = tile.name();
     let config = TileConfig::new(core, Some(ThreadNiceness::Highest));
     (name, Box::new(tile_runner(tile, spine, config)))
-}
-
-fn sleep_until_genesis(genesis_unix_secs: u64) {
-    let genesis = UNIX_EPOCH + Duration::from_secs(genesis_unix_secs);
-    let Ok(remaining) = genesis.duration_since(SystemTime::now()) else {
-        return;
-    };
-
-    silver_log::info!("waiting {}s for genesis at {genesis_unix_secs}", remaining.as_secs());
-    std::thread::sleep(remaining);
 }
