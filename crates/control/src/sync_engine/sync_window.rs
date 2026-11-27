@@ -197,6 +197,13 @@ impl SyncWindow {
         self.update(slot, |e| e.coverage.envelope_covered = true);
     }
 
+    pub fn payload_withheld(&mut self, slot: Slot) {
+        self.update(slot, |e| {
+            e.coverage.envelope_covered = true;
+            e.coverage.columns_covered = true;
+        });
+    }
+
     /// Slots above the tail, up to `up_to`, for which we have neither a block
     /// nor proof there was none — the run that says we are behind on *blocks*
     /// rather than on data or on a quiet chain.

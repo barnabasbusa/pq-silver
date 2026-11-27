@@ -90,18 +90,19 @@ impl Syncing {
         let Some(d) = self.ranges.on_terminator(request_id, delivered, now) else {
             return;
         };
-        // Silence across a span the peer holds is the one emptiness proof
-        // beacon state cannot supply: with no block above the run, no
-        // `parent_slot` ever spans it, and the tail would owe these slots
-        // forever. Which *delivered* slots settle is beacon state's call, not
-        // the wire's — a block it has not reported may still be in its hands.
-        if d.kind == DataKind::Block &&
-            d.served == 0 &&
-            ctx.peers.claims_span(peer, d.span.0..=d.span.1)
-        {
-            for slot in d.span.0..=d.span.1 {
-                window.mark_empty(slot);
-            }
+        // Silence across a span the peer holds proves it has no blocks, or no
+        // revealed payloads. Beacon state cannot prove this when no child
+        // above the run reports `parent_slot` or `parent_empty`. Column
+        // silence proves nothing: the peer may custody none of ours. A partial
+        // delivery proves nothing either: beacon state settles those slots.
+        if d.served != 0 || !ctx.peers.claims_span(peer, d.span.0..=d.span.1) {
+            return;
+        }
+        let span = d.span.0..=d.span.1;
+        match d.kind {
+            DataKind::Block => span.for_each(|slot| window.mark_empty(slot)),
+            DataKind::Envelope => span.for_each(|slot| window.payload_withheld(slot)),
+            DataKind::Columns => {}
         }
     }
 
