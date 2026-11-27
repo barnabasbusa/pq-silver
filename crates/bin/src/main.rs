@@ -5,7 +5,7 @@ use std::{
     path::Path,
     sync::Arc,
     thread,
-    time::{Duration, Instant},
+    time::Instant,
 };
 
 use clap::Parser;

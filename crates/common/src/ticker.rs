@@ -145,7 +145,7 @@ impl SlotTicker {
     }
 
     /// `None` before genesis.
-    fn since_genesis(&self, elapsed: Duration) -> Option<Duration> {
+    fn duration_since_genesis(&self, elapsed: Duration) -> Option<Duration> {
         let offset = Duration::from_millis(self.anchor_genesis_ms.unsigned_abs());
         if self.anchor_genesis_ms >= 0 {
             Some(offset + elapsed)
@@ -156,7 +156,7 @@ impl SlotTicker {
 
     /// Zero before genesis: every query then answers as at the start of slot 0.
     pub fn millis_since_genesis(&self) -> u64 {
-        self.since_genesis(self.elapsed()).map_or(0, |since| since.as_millis() as u64)
+        self.duration_since_genesis(self.elapsed()).map_or(0, |since| since.as_millis() as u64)
     }
 
     fn elapsed(&self) -> Duration {
@@ -178,7 +178,7 @@ impl SlotTicker {
     /// Before genesis the start of slot 0, which lies in the future.
     pub fn current_slot_start(&self) -> (u64, Instant) {
         let now = Instant::now();
-        let Some(since_genesis) = self.since_genesis(now.duration_since(self.anchor)) else {
+        let Some(since_genesis) = self.duration_since_genesis(now.duration_since(self.anchor)) else {
             let until_genesis = Duration::from_millis(self.anchor_genesis_ms.unsigned_abs());
             return (0, self.anchor + until_genesis);
         };
@@ -280,7 +280,7 @@ impl SlotTicker {
     }
 
     pub fn tick(&mut self) -> TickEvent {
-        let Some(since_genesis) = self.since_genesis(self.elapsed()) else {
+        let Some(since_genesis) = self.duration_since_genesis(self.elapsed()) else {
             return TickEvent::None;
         };
         let ms = since_genesis.as_millis() as u64;
